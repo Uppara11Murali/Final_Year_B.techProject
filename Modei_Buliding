@@ -1,0 +1,384 @@
+
+
+import pandas as pd # Used of for Data Manipulation.
+import numpy as np # used for numerical calculation.
+import matplotlib.pyplot as plt # Used for Data Visuvalization
+import seaborn as sns # used for Data Visuvalization
+import datetime as dt # handle the timeseries data
+import calendar # to handle date type data 
+from sklearn import metrics
+from sklearn.preprocessing import OneHotEncoder,MinMaxScaler,RobustScaler
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+
+inventory = pd.read_excel(r"Medical Inventory Optimaization Dataset.xlsx")
+
+#################################### Type Casting ##########################################
+
+inventory.info()
+
+# 1) The ID varialbe is categorical but it given as Numerical.
+# 2) The Dateofbill is also also time series but given as object we need to change.
+
+inventory['Patient_ID'] = inventory['Patient_ID'].astype(str)
+
+inventory['Dateofbill'] = inventory['Dateofbill'].astype('datetime64[ns]')
+
+################################### Handling Duplicates #################################
+inventory.duplicated().sum()
+
+inventory.drop_duplicates(inplace = True,keep = 'first')
+
+inventory.info()
+################################### Adding of columns for EDA #################################
+
+inventory['bill_of_month'] = inventory['Dateofbill'].dt.strftime('%B')
+inventory.info()
+
+inventory['bill_of_quater'] = inventory['Dateofbill'].dt.quarter
+inventory.info()
+################################### EDA & Preprocessing Forecasting for Week ###################################################
+inventory.sort_values(by ='Dateofbill',inplace=True)
+inventory['weekofbill'] = inventory['Dateofbill'].dt.isocalendar().week
+inventory['week_of_first_day'] = inventory.groupby('weekofbill')['Dateofbill'].transform('min').dt.isocalendar().week
+inventory_week = inventory.groupby('weekofbill')['Quantity'].sum().reset_index()
+
+
+plt.plot(inventory_week.index, inventory_week['Quantity'])
+plt.show()
+
+
+
+from statsmodels.graphics.tsaplots import plot_acf,plot_pacf
+# Plot autocorrelation using statsmodels.graphics.tsaplots.plot_acf
+plot_acf(inventory_week['Quantity'], lags=25) # Assuming monthly data, set lags to 12 for one year
+plt.title('Autocorrelation Plot for Quantity in 2022')
+plt.xlabel('Lags (Months)')
+plt.ylabel('Autocorrelation')
+plt.show()
+plot_pacf(inventory_week['Quantity'], lags=25)
+
+
+# Stationarity Check:
+
+"""A stationary time series is one whose statistical properties, 
+such as mean, variance, and autocorrelation, do not change over time. 
+In contrast, a non-stationary time series might exhibit trends, seasonality, 
+or other patterns that make its statistical properties vary over time."""
+
+# The null hypothesis of the ADF(Augumented Decay Fuller) test is that the time series is non-stationary. 
+
+# Null Hypothesis (H0): The time series is non-stationary.
+# Alternative Hypothesis (H1): The time series is stationary.
+
+
+from statsmodels.tsa.stattools import adfuller
+dftest = adfuller(inventory_week.Quantity , autolag = 'AIC')
+print("1. ADF : ",dftest[0])
+print("2. P-Value : ", dftest[1])
+print("3. Num Of Lags : ", dftest[2])
+print("4. Num Of Observations Used For ADF Regression and Critical Values Calculation :", dftest[3])
+print("5. Critical Values :")
+for key, val in dftest[4].items():
+    print("\t",key, ": ", val)
+
+'''To know more about the time series stationarity, 
+we can perform the ADfuller test, a test based on hypothesis, 
+where if the p-value is less than 0.05, then we can consider the time series 
+is stationary, and if the P-value is greater than 0.05, then the time series is 
+non-stationary.'''
+
+###################################################3-------Moving average------################################################
+
+mv_pred = inventory_week['Quantity'].rolling(5).mean()
+MV = metrics.mean_absolute_percentage_error(mv_pred[4:], inventory_week['Quantity'][4:])
+MV 
+
+################################################################################################################################
+##################################################### SARIMA MODEL #########################################################
+
+# Based on the adfuller model we can say that our data is not a stationary.
+# so we are using the SARIMAX model. 
+import statsmodels.api as sm
+
+model=sm.tsa.statespace.SARIMAX(inventory_week['Quantity'],order=(4, 1, 10),seasonal_order=(1,0,1,52))
+results=model.fit()
+inventory_week['forecast']=results.predict(start=0,end=52,dynamic=False)
+inventory_week[['Quantity','forecast']][1:].plot(figsize=(12,8))
+np.sqrt(metrics.mean_squared_error(inventory_week['forecast'][1:],inventory_week['Quantity'][1:]))
+sari = metrics.mean_absolute_percentage_error(inventory_week['Quantity'][1:], inventory_week['forecast'][1:])
+################################# ARIMA MODEL #######################################################
+
+from statsmodels.tsa.arima.model import ARIMA
+
+model = ARIMA(inventory_week['Quantity'], order=(4,1,10))
+results = model.fit()
+
+print(results.summary())
+
+forecast = results.predict(start = 1,end = 51)
+
+inventory_week[['Quantity']].plot(figsize=(12,8))
+forecast.plot(figsize=(12,8))
+rmse = np.sqrt(metrics.mean_squared_error(inventory_week['Quantity'][1:], forecast) )
+ari = metrics.mean_absolute_percentage_error(inventory_week['Quantity'][1:], forecast)
+####################################################################################################
+
+################################# SARIMAX MODEL #######################################################
+"""
+SARIMA introduces the concept of seasonality to the ARIMA model. 
+Seasonality refers to recurring patterns or cycles in the data that repeat at
+regular intervals. The seasonal component is denoted by the parameter S, 
+which represents the number of observations in each season.
+
+p: Order of the autoregressive (AR) component.
+d: Degree of differencing.
+q: Order of the moving average (MA) component.
+P: Seasonal order of the autoregressive (AR) component.
+D: Seasonal degree of differencing.
+Q: Seasonal order of the moving average (MA) component.
+s: Seasonal period.
+"""
+sarimax_data = inventory.drop(['Patient_ID','bill_of_month','bill_of_quater'],axis =1)
+
+sarimax_data.drop(['Typeofsales','DrugName','RtnMRP','Final_Sales','Dateofbill'], axis =1, inplace=True)
+# sarimax_data.drop(['SubCat'], axis =1, inplace=True) When we drop this feature i got MAPE = 5.89% 
+# and it not drops this i got the 2 approximately
+sarimax_data.drop(['Specialisation'], axis =1, inplace=True)
+sarimax_data.drop(['Quantity'], axis =1, inplace=True)
+sarimax_data.info()
+
+numerical = sarimax_data.select_dtypes(['int64','float64']).columns
+categorical = sarimax_data.select_dtypes(['object']).columns
+num = Pipeline(steps= [('scaling',RobustScaler())])
+cat = Pipeline([('encoding',OneHotEncoder())])
+preprocess = ColumnTransformer([('scaling',num,numerical),
+                                ('encoding',cat,categorical)],remainder=  'passthrough')
+preprocess_fit =  preprocess.fit(sarimax_data)
+
+
+sarimax_data_preprocess = pd.DataFrame(preprocess_fit.transform(sarimax_data).toarray() ,columns=preprocess_fit.get_feature_names_out())
+
+sarimax_data = pd.concat([sarimax_data_preprocess,inventory[['Dateofbill','Quantity']]],axis =1)
+
+sarimax_data['weekofbill'] = sarimax_data['Dateofbill'].dt.isocalendar().week
+# inventory['week_of_first_day'] = sarimax_data.groupby('weekofbill')['Dateofbill'].transform('min').dt.isocalendar().week
+# sarimax_data = sarimax_data.groupby('weekofbill').sum().reset_index()
+# Create the 'week_of_first_day' column
+inventory['week_of_first_day'] = sarimax_data.groupby('weekofbill')['Dateofbill'].transform('min').dt.isocalendar().week
+
+# Exclude 'Dateofbill' before summing
+sarimax_data = sarimax_data.drop(columns=['Dateofbill']).groupby('weekofbill').sum().reset_index()
+
+
+
+train = sarimax_data
+test = sarimax_data
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+sarimax_model = SARIMAX(train['Quantity'],exog=train.drop(['Quantity','weekofbill'],axis=1), order=(4, 1, 10),seasonal_order=(1,0,1,52))
+sarimax_result = sarimax_model.fit()
+pred_sarimax = sarimax_result.predict(start = test.index[0], end = test.index[-1])
+sarimax = metrics.mean_absolute_percentage_error(pred_sarimax, test.Quantity)
+sarimax*100
+####################################################################################################
+
+####################################################################################################
+#################################################### SES MODEL  #####################################################
+from statsmodels.tsa.holtwinters import SimpleExpSmoothing
+dict1 = {}
+for alpha in range(1,10):
+    model = SimpleExpSmoothing(inventory_week['Quantity'])
+    model_fit = model.fit(smoothing_level=alpha/10, optimized=False)
+    predictions = model_fit.predict(start=0, end=len(inventory_week['Quantity'])-1)
+    mape = metrics.mean_absolute_percentage_error(inventory_week['Quantity'], predictions)
+    dict1[alpha/10] = mape
+ses = min(dict1.values())
+####################################################################################################
+#################################################### Holt-winters MODEL  #####################################################
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
+list_holt = []
+# Define the hyperparameter combinations
+def holt_winters(trend, seasonal, periods, smooth, use_boxcox):
+    model = ExponentialSmoothing(inventory_week['Quantity'], trend=trend, seasonal=seasonal,
+                                 seasonal_periods=periods, use_boxcox=use_boxcox)
+    model_fit = model.fit(smoothing_level=smooth, smoothing_trend=smooth, smoothing_seasonal=smooth)
+    predictions = model_fit.predict(start=0, end=len(inventory_week['Quantity']) - 1)
+    mape = metrics.mean_absolute_percentage_error(inventory_week['Quantity'], predictions)
+    return mape
+
+# Specify the hyperparameter grid
+trend_seasonal = ['add', 'additive', 'mul', 'multiplicative']
+seasonal_periods = [5, 7, 9, 11, 13, 15, 17, 19]
+smoothing = [0.2, 0.5, 0.8]
+use_boxcox_values = [True, False]  # Set to True or False based on your preference
+
+# Iterate over hyperparameter combinations
+for trend in trend_seasonal:
+    for seasonal in trend_seasonal:
+        for periods in seasonal_periods:
+            for smooth in smoothing:
+                for use_boxcox in use_boxcox_values:
+                    mape = holt_winters(trend, seasonal, periods, smooth, use_boxcox)
+                    print(f"Parameters: Trend={trend}, Seasonal={seasonal}, Periods={periods}, Smoothing={smooth}, Use_BoxCox={use_boxcox}, MAPE={mape}")
+                    list_holt.append(mape)
+hw = min(list_holt)
+# This are the best parametres for this model 
+# Parameters: Trend=multiplicative, Seasonal=multiplicative, Periods=15, Smoothing=0.2, 
+# Use_BoxCox=False, MAPE=0.13376882169095172
+
+##################################################################################################################################
+#################################################### VAR MODEL  ################################################################
+
+from statsmodels.tsa.api import VAR
+
+inventory_week['log_Quantity'] = np.log(inventory_week['Quantity'])
+inventory_week['week_square'] = np.square(inventory_week['weekofbill'])
+inventory_week.week_square = inventory_week.week_square.astype('int64')
+inventory_week.info()
+VAR_data = inventory_week[['Quantity','week_square', 'log_Quantity']]
+
+model = VAR(VAR_data)
+model_fitted = model.fit()
+lag_order = model_fitted.k_ar
+
+forecast = model_fitted.forecast(VAR_data.values[-lag_order:], steps=10)
+VAR_mape = metrics.mean_absolute_percentage_error(VAR_data[-10:], forecast)
+VAR_mape
+
+################################################################################################################################
+
+di = pd.Series({'Moving Average':MV,'Simple Exponential':ses,'Holts Winter':hw,
+                'ARIMA':ari,'SARIMA':sari,'SARIMAX':sarimax,'VAR':VAR_mape})
+mape = pd.DataFrame(di, columns=['mape'])
+mape
+
+
+
+################################################################################################################################
+#######################################------------Best_model--------------------#################################################
+import joblib
+################################# SARIMAX MODEL #######################################################
+"""
+SARIMA introduces the concept of seasonality to the ARIMA model. 
+Seasonality refers to recurring patterns or cycles in the data that repeat at
+regular intervals. The seasonal component is denoted by the parameter S, 
+which represents the number of observations in each season.
+
+p: Order of the autoregressive (AR) component.
+d: Degree of differencing.
+q: Order of the moving average (MA) component.
+P: Seasonal order of the autoregressive (AR) component.
+D: Seasonal degree of differencing.
+Q: Seasonal order of the moving average (MA) component.
+s: Seasonal period.
+"""
+
+inventory = pd.read_excel(r"Medical Inventory Optimaization Dataset.xlsx")
+
+#################################### Type Casting ##########################################
+
+inventory.info()
+
+# 1) The ID varialbe is categorical but it given as Numerical.
+# 2) The Dateofbill is also also time series but given as object we need to change.
+
+inventory['Patient_ID'] = inventory['Patient_ID'].astype(str)
+
+inventory['Dateofbill'] = inventory['Dateofbill'].astype('datetime64[ns]')
+
+################################### Handling Duplicates #################################
+inventory.duplicated().sum()
+
+inventory.drop_duplicates(inplace = True,keep = 'first')
+
+sarimax_data = inventory.drop(['Patient_ID'],axis =1)
+
+sarimax_data.drop(['Typeofsales','DrugName','RtnMRP','Final_Sales','Dateofbill'], axis =1, inplace=True)
+sarimax_data.drop(['SubCat'], axis =1, inplace=True) #When we drop this feature i got MAPE = 5.89% 
+# and it not drops this i got the 2 approximately
+sarimax_data.drop(['Specialisation'], axis =1, inplace=True)
+sarimax_data.drop(['Quantity'], axis =1, inplace=True)
+sarimax_data.info()
+
+numerical = sarimax_data.select_dtypes(['int64','float64']).columns
+categorical = sarimax_data.select_dtypes(['object']).columns
+num = Pipeline(steps= [('scaling',RobustScaler())])
+cat = Pipeline([('encoding',OneHotEncoder())])
+preprocess = ColumnTransformer([('scaling',num,numerical),
+                                ('encoding',cat,categorical)],remainder=  'passthrough')
+preprocess_fit =  preprocess.fit(sarimax_data)
+
+
+sarimax_data_preprocess = pd.DataFrame(preprocess_fit.transform(sarimax_data).toarray() ,columns=preprocess_fit.get_feature_names_out())
+
+sarimax_data = pd.concat([sarimax_data_preprocess,inventory[['Dateofbill','Quantity']]],axis =1)
+
+sarimax_data['weekofbill'] = sarimax_data['Dateofbill'].dt.isocalendar().week
+# Create the 'week_of_first_day' column
+inventory['week_of_first_day'] = sarimax_data.groupby('weekofbill')['Dateofbill'].transform('min').dt.isocalendar().week
+
+# Exclude 'Dateofbill' before summing
+sarimax_data = sarimax_data.drop(columns=['Dateofbill']).groupby('weekofbill').sum().reset_index()
+
+
+train = sarimax_data
+test = sarimax_data
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+sarimax_model = SARIMAX(train['Quantity'],exog=train.drop(['Quantity','weekofbill'],axis=1), order=(4, 1, 10),seasonal_order=(1,0,1,52))
+sarimax_result = sarimax_model.fit()
+pred_sarimax = sarimax_result.predict(start = test.index[0], end = test.index[-1])
+sarimax = metrics.mean_absolute_percentage_error(pred_sarimax, test.Quantity)
+root_mean = np.sqrt(metrics.mean_squared_error(pred_sarimax,train['Quantity']))
+sarimax*100
+
+
+import joblib
+best_model = sarimax_result
+joblib.dump(best_model, 'best_model_sarimax.pkl')
+joblib.dump(preprocess_fit,'preprocess_fit.pkl')
+##################################################### Deployment Code ##########################################################
+import joblib
+import os 
+import pandas as pd # Used of for Data Manipulation.
+import numpy as np # used for numerical calculation.
+import datetime as dt # handle the timeseries data
+import pickle
+#os.chdir(r"C:\Users\madhu\OneDrive\Desktop\Medical Inventory\Model_building")
+
+sarimax_model = joblib.load('best_model_sarimax.pkl') 
+preprocess_fit = joblib.load('preprocess_fit.pkl')
+
+inventory['Patient_ID'] = inventory['Patient_ID'].astype(str)
+
+inventory['Dateofbill'] = inventory['Dateofbill'].astype('datetime64[ns]')
+
+################################### Handling Duplicates #################################
+inventory.duplicated().sum()
+
+inventory.drop_duplicates(inplace = True,keep = 'first')
+#################
+sarimax_data = inventory.drop(['Patient_ID'],axis =1)
+
+sarimax_data.drop(['Typeofsales','DrugName','RtnMRP','Final_Sales','Dateofbill'], axis =1, inplace=True)
+sarimax_data.drop(['SubCat'], axis =1, inplace=True)#  When we drop this feature i got MAPE = 5.89% 
+# and it not drops this i got the 2 approximately
+sarimax_data.drop(['Specialisation'], axis =1, inplace=True)
+sarimax_data.drop(['Quantity'], axis =1, inplace=True)
+
+sarimax_data_preprocess = pd.DataFrame(preprocess_fit.transform(sarimax_data).toarray() ,columns=preprocess_fit.get_feature_names_out())
+
+
+sarimax_data = pd.concat([sarimax_data_preprocess,inventory[['Dateofbill','Quantity']]],axis =1)
+
+sarimax_data['weekofbill'] = sarimax_data['Dateofbill'].dt.isocalendar().week
+# Create the 'week_of_first_day' column
+inventory['week_of_first_day'] = sarimax_data.groupby('weekofbill')['Dateofbill'].transform('min').dt.isocalendar().week
+
+# Exclude 'Dateofbill' before summing
+sarimax_data = sarimax_data.drop(columns=['Dateofbill']).groupby('weekofbill').sum().reset_index()
+
+
+pred_sarimax = sarimax_result.predict(start = test.index[0], end = test.index[-1])
+
+
